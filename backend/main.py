@@ -1,10 +1,15 @@
+
 from datetime import datetime
+import math
+import sqlite3
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.db import get_connection, init_db
 
+
+MAX_AUTO_REFUND = 5000.0
 
 app = FastAPI(
     title="Mobile Money Dispute Backend",
@@ -24,34 +29,36 @@ def startup():
 @app.get("/transactions/{txn_id}")
 def get_transaction(txn_id: str):
     connection = get_connection()
-    cursor = connection.cursor()
 
-    cursor.execute(
-        """
-        SELECT
-            txn_id,
-            msisdn,
-            amount,
-            status,
-            debited,
-            credited_to_receiver,
-            timestamp
-        FROM transactions
-        WHERE txn_id = ?
-        """,
-        (txn_id,),
-    )
-
-    transaction = cursor.fetchone()
-    connection.close()
-
-    if transaction is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Transaction not found",
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            SELECT
+                txn_id,
+                msisdn,
+                amount,
+                status,
+                debited,
+                credited_to_receiver,
+                timestamp
+            FROM transactions
+            WHERE txn_id = ?
+            """,
+            (txn_id,),
         )
 
-    return dict(transaction)
+        transaction = cursor.fetchone()
+
+        if transaction is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Transaction not found",
+            )
+
+        return dict(transaction)
+    finally:
+        connection.close()
 
 
 # ============================================================
@@ -61,29 +68,30 @@ def get_transaction(txn_id: str):
 @app.get("/transactions")
 def get_customer_transactions(msisdn: str):
     connection = get_connection()
-    cursor = connection.cursor()
 
-    cursor.execute(
-        """
-        SELECT
-            txn_id,
-            msisdn,
-            amount,
-            status,
-            debited,
-            credited_to_receiver,
-            timestamp
-        FROM transactions
-        WHERE msisdn = ?
-        ORDER BY timestamp DESC
-        """,
-        (msisdn,),
-    )
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            SELECT
+                txn_id,
+                msisdn,
+                amount,
+                status,
+                debited,
+                credited_to_receiver,
+                timestamp
+            FROM transactions
+            WHERE msisdn = ?
+            ORDER BY timestamp DESC
+            """,
+            (msisdn,),
+        )
 
-    transactions = cursor.fetchall()
-    connection.close()
-
-    return [dict(transaction) for transaction in transactions]
+        transactions = cursor.fetchall()
+        return [dict(transaction) for transaction in transactions]
+    finally:
+        connection.close()
 
 
 # ============================================================
@@ -93,29 +101,29 @@ def get_customer_transactions(msisdn: str):
 @app.get("/wallet/{msisdn}")
 def get_wallet(msisdn: str):
     connection = get_connection()
-    cursor = connection.cursor()
 
-    cursor.execute(
-        """
-        SELECT
-            msisdn,
-            balance
-        FROM wallets
-        WHERE msisdn = ?
-        """,
-        (msisdn,),
-    )
-
-    wallet = cursor.fetchone()
-    connection.close()
-
-    if wallet is None:
-        raise HTTPException(
-            status_code=404,
-            detail="Wallet not found",
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            SELECT msisdn, balance
+            FROM wallets
+            WHERE msisdn = ?
+            """,
+            (msisdn,),
         )
 
-    return dict(wallet)
+        wallet = cursor.fetchone()
+
+        if wallet is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Wallet not found",
+            )
+
+        return dict(wallet)
+    finally:
+        connection.close()
 
 
 # ============================================================
@@ -125,119 +133,176 @@ def get_wallet(msisdn: str):
 @app.get("/reversals/{txn_id}")
 def check_reversal(txn_id: str):
     connection = get_connection()
-    cursor = connection.cursor()
 
-    cursor.execute(
-        """
-        SELECT
-            id,
-            txn_id,
-            amount,
-            reason,
-            created_at
-        FROM reversals
-        WHERE txn_id = ?
-        """,
-        (txn_id,),
-    )
+    try:
+        cursor = connection.cursor()
+        cursor.execute(
+            """
+            SELECT
+                id,
+                txn_id,
+                amount,
+                reason,
+                created_at
+            FROM reversals
+            WHERE txn_id = ?
+            """,
+            (txn_id,),
+        )
 
-    reversal = cursor.fetchone()
-    connection.close()
+        reversal = cursor.fetchone()
 
-    return {
-        "txn_id": txn_id,
-        "reversal_exists": reversal is not None,
-        "reversal": dict(reversal) if reversal else None,
-    }
+        return {
+            "txn_id": txn_id,
+            "reversal_exists": reversal is not None,
+            "reversal": dict(reversal) if reversal else None,
+        }
+    finally:
+        connection.close()
 
 
 # ============================================================
-# 5. CREATE REVERSAL
+# 5. CREATE REVERSAL — SERVER-SIDE SAFETY CHECKS
 # ============================================================
 
 class ReversalRequest(BaseModel):
-    txn_id: str
-    amount: float
-    reason: str
+    txn_id: str = Field(min_length=1)
+    amount: float = Field(gt=0, allow_inf_nan=False)
+    reason: str = Field(min_length=1)
 
 
 @app.post("/reversals")
 def create_reversal(request: ReversalRequest):
     connection = get_connection()
-    cursor = connection.cursor()
 
-    # Check whether transaction exists
-    cursor.execute(
-        """
-        SELECT *
-        FROM transactions
-        WHERE txn_id = ?
-        """,
-        (request.txn_id,),
-    )
+    try:
+        # Acquire a write lock before checking eligibility and duplicates.
+        # This helps prevent two concurrent requests creating two reversals.
+        connection.execute("BEGIN IMMEDIATE")
+        cursor = connection.cursor()
 
-    transaction = cursor.fetchone()
-
-    if transaction is None:
-        connection.close()
-
-        raise HTTPException(
-            status_code=404,
-            detail="Transaction not found",
+        # Rule 1: Transaction must exist.
+        cursor.execute(
+            """
+            SELECT
+                txn_id,
+                msisdn,
+                amount,
+                status,
+                debited,
+                credited_to_receiver
+            FROM transactions
+            WHERE txn_id = ?
+            """,
+            (request.txn_id,),
         )
 
-    # Check whether reversal already exists
-    cursor.execute(
-        """
-        SELECT *
-        FROM reversals
-        WHERE txn_id = ?
-        """,
-        (request.txn_id,),
-    )
+        transaction = cursor.fetchone()
 
-    existing_reversal = cursor.fetchone()
+        if transaction is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Transaction not found",
+            )
 
-    if existing_reversal is not None:
-        connection.close()
+        transaction = dict(transaction)
 
-        raise HTTPException(
-            status_code=409,
-            detail="Reversal already exists for this transaction",
-        )
+        # Rule 2: Only failed transactions qualify.
+        if transaction["status"] != "FAILED":
+            raise HTTPException(
+                status_code=409,
+                detail="Only failed transactions can be reversed",
+            )
 
-    # Create reversal
-    cursor.execute(
-        """
-        INSERT INTO reversals (
-            txn_id,
-            amount,
-            reason,
-            created_at
-        )
-        VALUES (?, ?, ?, ?)
-        """,
-        (
-            request.txn_id,
+        # Rule 3: Money must have been debited.
+        if not transaction["debited"]:
+            raise HTTPException(
+                status_code=409,
+                detail="No debit was recorded for this transaction",
+            )
+
+        # Rule 4: Receiver must not have been credited.
+        if transaction["credited_to_receiver"]:
+            raise HTTPException(
+                status_code=409,
+                detail="Receiver was credited; reversal is not permitted",
+            )
+
+        # Rule 5: Requested amount must match the database amount.
+        actual_amount = float(transaction["amount"])
+
+        if not math.isclose(
             request.amount,
-            request.reason,
-            datetime.now().isoformat(),
-        ),
-    )
+            actual_amount,
+            rel_tol=0.0,
+            abs_tol=0.000001,
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Requested amount does not match the transaction amount",
+            )
 
-    connection.commit()
+        # Rule 6: Amounts above ₹5,000 need human approval.
+        if actual_amount > MAX_AUTO_REFUND:
+            raise HTTPException(
+                status_code=403,
+                detail="Refunds above ₹5000 require human approval",
+            )
 
-    reversal_id = cursor.lastrowid
+        # Rule 7: Never create a duplicate reversal.
+        cursor.execute(
+            """
+            SELECT id
+            FROM reversals
+            WHERE txn_id = ?
+            """,
+            (request.txn_id,),
+        )
 
-    connection.close()
+        if cursor.fetchone() is not None:
+            raise HTTPException(
+                status_code=409,
+                detail="Reversal already exists for this transaction",
+            )
 
-    return {
-        "success": True,
-        "message": "Reversal created successfully",
-        "reversal_id": reversal_id,
-        "txn_id": request.txn_id,
-        "amount": request.amount,
-    }
+        # All eligibility checks passed. Record the reversal request.
+        # This mock operation does not update wallet balances or connect
+        # to a real payment network.
+        cursor.execute(
+            """
+            INSERT INTO reversals (
+                txn_id,
+                amount,
+                reason,
+                created_at
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                request.txn_id,
+                actual_amount,
+                request.reason.strip(),
+                datetime.now().isoformat(),
+            ),
+        )
+
+        reversal_id = cursor.lastrowid
+        connection.commit()
+
+        return {
+            "success": True,
+            "message": "Reversal record created successfully",
+            "reversal_id": reversal_id,
+            "txn_id": request.txn_id,
+            "amount": actual_amount,
+        }
+
+    except Exception:
+        connection.rollback()
+        raise
+
+    finally:
+        connection.close()
 
 
 # ============================================================
@@ -246,44 +311,76 @@ def create_reversal(request: ReversalRequest):
 
 class EscalationRequest(BaseModel):
     txn_id: str | None = None
-    msisdn: str
-    reason: str
+    msisdn: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
 
 
 @app.post("/escalations")
 def create_escalation(request: EscalationRequest):
     connection = get_connection()
-    cursor = connection.cursor()
 
-    cursor.execute(
-        """
-        INSERT INTO escalations (
-            txn_id,
-            msisdn,
-            reason,
-            status,
-            created_at
+    try:
+        cursor = connection.cursor()
+
+        # If a transaction is supplied, verify that it belongs to the
+        # MSISDN included in the escalation request.
+        if request.txn_id:
+            cursor.execute(
+                """
+                SELECT msisdn
+                FROM transactions
+                WHERE txn_id = ?
+                """,
+                (request.txn_id,),
+            )
+
+            transaction = cursor.fetchone()
+
+            if transaction is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail="Transaction not found",
+                )
+
+            if transaction["msisdn"] != request.msisdn:
+                raise HTTPException(
+                    status_code=403,
+                    detail="Transaction does not belong to this customer",
+                )
+
+        cursor.execute(
+            """
+            INSERT INTO escalations (
+                txn_id,
+                msisdn,
+                reason,
+                status,
+                created_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (
+                request.txn_id,
+                request.msisdn,
+                request.reason.strip(),
+                "OPEN",
+                datetime.now().isoformat(),
+            ),
         )
-        VALUES (?, ?, ?, ?, ?)
-        """,
-        (
-            request.txn_id,
-            request.msisdn,
-            request.reason,
-            "OPEN",
-            datetime.now().isoformat(),
-        ),
-    )
 
-    connection.commit()
+        escalation_id = cursor.lastrowid
+        connection.commit()
 
-    escalation_id = cursor.lastrowid
+        return {
+            "success": True,
+            "message": "Case escalated to human agent",
+            "escalation_id": escalation_id,
+            "status": "OPEN",
+        }
 
-    connection.close()
+    except Exception:
+        connection.rollback()
+        raise
 
-    return {
-        "success": True,
-        "message": "Case escalated to human agent",
-        "escalation_id": escalation_id,
-        "status": "OPEN",
-    }
+    finally:
+        connection.close()
