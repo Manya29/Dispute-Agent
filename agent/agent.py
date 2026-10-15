@@ -9,6 +9,7 @@ from tools import (
     get_wallet,
     check_reversal,
     create_escalation,
+    set_customer_token,
 )
 from guardrails import validate_refund
 
@@ -315,16 +316,17 @@ def investigate_refund(
     )
 
 
-def run_agent(user_msisdn: str, user_message: str) -> str:
+def run_agent(user_msisdn: str, user_message: str, customer_token: str) -> str:
     """Run the dispute agent with a deterministic refund safety path."""
     user_msisdn = user_msisdn.strip()
     user_message = user_message.strip()
+    set_customer_token(customer_token)
 
-    if not user_msisdn or not user_message:
+    if not user_msisdn or not user_message or not customer_token.strip():
         return output_result(
             "NEED_INFO",
             "The customer identifier and request are required.",
-            "Please provide your customer MSISDN and describe the issue.",
+            "Please provide your customer MSISDN, customer access token, and describe the issue.",
             [],
         )
 
@@ -439,14 +441,17 @@ Safety rules:
 
 
 if __name__ == "__main__":
+    from getpass import getpass
+
     print("Mobile Money Dispute Resolution Agent")
     print("Refund execution is disabled in this prototype.\n")
 
     msisdn = input("Enter your test customer MSISDN: ").strip()
+    token = getpass("Enter your customer bearer token: ").strip()
     question = input("Describe the transaction problem: ").strip()
 
     try:
         print("\n--- AGENT RESPONSE ---")
-        print(run_agent(msisdn, question))
+        print(run_agent(msisdn, question, token))
     except KeyboardInterrupt:
         print("\nInvestigation cancelled.")

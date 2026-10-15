@@ -3,6 +3,19 @@ import requests
 
 BACKEND_URL = "http://127.0.0.1:8000"
 TIMEOUT = 10
+_CUSTOMER_TOKEN = ""
+
+
+def set_customer_token(token: str) -> None:
+    """Set the authenticated customer's bearer token for backend requests."""
+    global _CUSTOMER_TOKEN
+    _CUSTOMER_TOKEN = token.strip()
+
+
+def auth_headers():
+    if not _CUSTOMER_TOKEN:
+        return {}
+    return {"Authorization": f"Bearer {_CUSTOMER_TOKEN}"}
 
 
 def handle_response(response):
@@ -30,6 +43,7 @@ def get_transaction(txn_id: str):
     try:
         response = requests.get(
             f"{BACKEND_URL}/transactions/{txn_id}",
+            headers=auth_headers(),
             timeout=TIMEOUT,
         )
         return handle_response(response)
@@ -42,7 +56,7 @@ def get_customer_transactions(msisdn: str):
     try:
         response = requests.get(
             f"{BACKEND_URL}/transactions",
-            params={"msisdn": msisdn},
+            headers=auth_headers(),
             timeout=TIMEOUT,
         )
         return handle_response(response)
@@ -55,6 +69,7 @@ def get_wallet(msisdn: str):
     try:
         response = requests.get(
             f"{BACKEND_URL}/wallet/{msisdn}",
+            headers=auth_headers(),
             timeout=TIMEOUT,
         )
         return handle_response(response)
@@ -67,6 +82,7 @@ def check_reversal(txn_id: str):
     try:
         response = requests.get(
             f"{BACKEND_URL}/reversals/{txn_id}",
+            headers=auth_headers(),
             timeout=TIMEOUT,
         )
         return handle_response(response)
@@ -88,6 +104,7 @@ def create_reversal(txn_id: str, amount: float, reason: str):
                 "amount": amount,
                 "reason": reason,
             },
+            headers=auth_headers(),
             timeout=TIMEOUT,
         )
         return handle_response(response)
@@ -109,6 +126,7 @@ def create_escalation(
                 "msisdn": msisdn,
                 "reason": reason,
             },
+            headers=auth_headers(),
             timeout=TIMEOUT,
         )
         return handle_response(response)

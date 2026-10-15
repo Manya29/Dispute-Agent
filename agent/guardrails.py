@@ -13,7 +13,9 @@ def parse_timestamp(value: str):
         timestamp = datetime.fromisoformat(value.replace("Z", "+00:00"))
 
         if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
+            # Older demo rows were saved as local, timezone-free timestamps.
+            # Interpret those as local time; newly seeded rows include UTC.
+            timestamp = timestamp.astimezone()
 
         return timestamp.astimezone(timezone.utc)
     except (ValueError, AttributeError, TypeError):

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from db import get_connection, init_db
 
@@ -12,7 +12,7 @@ transactions = [
         "status": "FAILED",
         "debited": 1,
         "credited_to_receiver": 0,
-        "timestamp": (datetime.now() - timedelta(hours=2)).isoformat(),
+        "timestamp": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
     },
 
     # 2. Successful transaction = reject
@@ -23,7 +23,7 @@ transactions = [
         "status": "SUCCESS",
         "debited": 1,
         "credited_to_receiver": 1,
-        "timestamp": (datetime.now() - timedelta(hours=3)).isoformat(),
+        "timestamp": (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(),
     },
 
     # 3. Pending transaction less than 24 hours = wait
@@ -34,7 +34,7 @@ transactions = [
         "status": "PENDING",
         "debited": 1,
         "credited_to_receiver": 0,
-        "timestamp": (datetime.now() - timedelta(hours=5)).isoformat(),
+        "timestamp": (datetime.now(timezone.utc) - timedelta(hours=5)).isoformat(),
     },
 
     # 4. Already reversed
@@ -45,7 +45,7 @@ transactions = [
         "status": "FAILED",
         "debited": 1,
         "credited_to_receiver": 0,
-        "timestamp": (datetime.now() - timedelta(hours=4)).isoformat(),
+        "timestamp": (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat(),
     },
 
     # 5. High amount = human approval required
@@ -56,7 +56,7 @@ transactions = [
         "status": "FAILED",
         "debited": 1,
         "credited_to_receiver": 0,
-        "timestamp": (datetime.now() - timedelta(hours=2)).isoformat(),
+        "timestamp": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
     },
 
     # 6. Another valid refund
@@ -67,7 +67,7 @@ transactions = [
         "status": "FAILED",
         "debited": 1,
         "credited_to_receiver": 0,
-        "timestamp": (datetime.now() - timedelta(hours=1)).isoformat(),
+        "timestamp": (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
     },
 
     # 7. Successful transaction
@@ -78,7 +78,7 @@ transactions = [
         "status": "SUCCESS",
         "debited": 1,
         "credited_to_receiver": 1,
-        "timestamp": (datetime.now() - timedelta(hours=6)).isoformat(),
+        "timestamp": (datetime.now(timezone.utc) - timedelta(hours=6)).isoformat(),
     },
 
     # 8. Valid refund
@@ -89,7 +89,7 @@ transactions = [
         "status": "FAILED",
         "debited": 1,
         "credited_to_receiver": 0,
-        "timestamp": (datetime.now() - timedelta(hours=2)).isoformat(),
+        "timestamp": (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
     },
 
     # 9. Pending
@@ -100,7 +100,7 @@ transactions = [
         "status": "PENDING",
         "debited": 1,
         "credited_to_receiver": 0,
-        "timestamp": (datetime.now() - timedelta(hours=10)).isoformat(),
+        "timestamp": (datetime.now(timezone.utc) - timedelta(hours=10)).isoformat(),
     },
 
     # 10. High amount
@@ -111,7 +111,7 @@ transactions = [
         "status": "FAILED",
         "debited": 1,
         "credited_to_receiver": 0,
-        "timestamp": (datetime.now() - timedelta(hours=3)).isoformat(),
+        "timestamp": (datetime.now(timezone.utc) - timedelta(hours=3)).isoformat(),
     },
 ]
 
@@ -199,7 +199,7 @@ def seed_reversal():
             "TXN004",
             700,
             "Original transaction failed",
-            datetime.now().isoformat(),
+            datetime.now(timezone.utc).isoformat(),
         ),
     )
 

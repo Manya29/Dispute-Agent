@@ -1,15 +1,44 @@
 
-from datetime import datetime
+from datetime import datetime, timezone
+import hmac
+import json
 import math
+import os
 import sqlite3
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException
 from pydantic import BaseModel, Field
 
 from backend.db import get_connection, init_db
 
 
 MAX_AUTO_REFUND = 5000.0
+
+
+def authenticate_customer(authorization: str | None = Header(default=None)) -> str:
+    """Resolve the authenticated customer from a configured bearer token.
+
+    CUSTOMER_API_TOKENS must be a JSON object mapping customer MSISDNs to
+    high-entropy bearer tokens. Tokens are never accepted from query params.
+    """
+    raw_tokens = os.environ.get("CUSTOMER_API_TOKENS", "")
+    try:
+        tokens = json.loads(raw_tokens)
+    except (TypeError, ValueError):
+        tokens = None
+
+    if not isinstance(tokens, dict) or not tokens:
+        raise HTTPException(status_code=503, detail="Customer authentication is not configured")
+
+    scheme, _, supplied = (authorization or "").partition(" ")
+    if scheme.lower() != "bearer" or not supplied:
+        raise HTTPException(status_code=401, detail="A bearer token is required")
+
+    for msisdn, expected in tokens.items():
+        if isinstance(msisdn, str) and isinstance(expected, str) and hmac.compare_digest(supplied, expected):
+            return msisdn
+
+    raise HTTPException(status_code=401, detail="Invalid bearer token")
 
 app = FastAPI(
     title="Mobile Money Dispute Backend",
@@ -27,7 +56,7 @@ def startup():
 # ============================================================
 
 @app.get("/transactions/{txn_id}")
-def get_transaction(txn_id: str):
+def get_transaction(txn_id: str, customer_msisdn: str = Depends(authenticate_customer)):
     connection = get_connection()
 
     try:
@@ -56,6 +85,9 @@ def get_transaction(txn_id: str):
                 detail="Transaction not found",
             )
 
+        if transaction["msisdn"] != customer_msisdn:
+            raise HTTPException(status_code=404, detail="Transaction not found")
+
         return dict(transaction)
     finally:
         connection.close()
@@ -66,7 +98,7 @@ def get_transaction(txn_id: str):
 # ============================================================
 
 @app.get("/transactions")
-def get_customer_transactions(msisdn: str):
+def get_customer_transactions(customer_msisdn: str = Depends(authenticate_customer)):
     connection = get_connection()
 
     try:
@@ -85,7 +117,7 @@ def get_customer_transactions(msisdn: str):
             WHERE msisdn = ?
             ORDER BY timestamp DESC
             """,
-            (msisdn,),
+            (customer_msisdn,),
         )
 
         transactions = cursor.fetchall()
@@ -99,7 +131,9 @@ def get_customer_transactions(msisdn: str):
 # ============================================================
 
 @app.get("/wallet/{msisdn}")
-def get_wallet(msisdn: str):
+def get_wallet(msisdn: str, customer_msisdn: str = Depends(authenticate_customer)):
+    if msisdn != customer_msisdn:
+        raise HTTPException(status_code=404, detail="Wallet not found")
     connection = get_connection()
 
     try:
@@ -131,7 +165,7 @@ def get_wallet(msisdn: str):
 # ============================================================
 
 @app.get("/reversals/{txn_id}")
-def check_reversal(txn_id: str):
+def check_reversal(txn_id: str, customer_msisdn: str = Depends(authenticate_customer)):
     connection = get_connection()
 
     try:
@@ -151,6 +185,11 @@ def check_reversal(txn_id: str):
         )
 
         reversal = cursor.fetchone()
+
+        cursor.execute("SELECT msisdn FROM transactions WHERE txn_id = ?", (txn_id,))
+        transaction = cursor.fetchone()
+        if transaction is None or transaction["msisdn"] != customer_msisdn:
+            raise HTTPException(status_code=404, detail="Transaction not found")
 
         return {
             "txn_id": txn_id,
@@ -172,7 +211,7 @@ class ReversalRequest(BaseModel):
 
 
 @app.post("/reversals")
-def create_reversal(request: ReversalRequest):
+def create_reversal(request: ReversalRequest, customer_msisdn: str = Depends(authenticate_customer)):
     connection = get_connection()
 
     try:
@@ -206,6 +245,9 @@ def create_reversal(request: ReversalRequest):
             )
 
         transaction = dict(transaction)
+
+        if transaction["msisdn"] != customer_msisdn:
+            raise HTTPException(status_code=404, detail="Transaction not found")
 
         # Rule 2: Only failed transactions qualify.
         if transaction["status"] != "FAILED":
@@ -282,7 +324,7 @@ def create_reversal(request: ReversalRequest):
                 request.txn_id,
                 actual_amount,
                 request.reason.strip(),
-                datetime.now().isoformat(),
+                datetime.now(timezone.utc).isoformat(),
             ),
         )
 
@@ -316,7 +358,9 @@ class EscalationRequest(BaseModel):
 
 
 @app.post("/escalations")
-def create_escalation(request: EscalationRequest):
+def create_escalation(request: EscalationRequest, customer_msisdn: str = Depends(authenticate_customer)):
+    if request.msisdn != customer_msisdn:
+        raise HTTPException(status_code=403, detail="Customer does not match authenticated account")
     connection = get_connection()
 
     try:
@@ -364,7 +408,7 @@ def create_escalation(request: EscalationRequest):
                 request.msisdn,
                 request.reason.strip(),
                 "OPEN",
-                datetime.now().isoformat(),
+                datetime.now(timezone.utc).isoformat(),
             ),
         )
 
